@@ -146,12 +146,12 @@ static zend_bool apc_cache_entry_hard_expired(apc_cache_entry_t *entry, time_t t
 	return entry->ttl && (time_t) (entry->ctime + entry->ttl) < t;
 }
 
-/* An entry is soft expired if no per-entry TTL is set, a global cache TTL is set,
+/* An entry is soft expired if a global cache TTL is set,
  * and the access time of the entry is older than the global TTL. Soft expired entries
  * are accessible by lookup operation, but may be removed from the cache at any time. */
 static zend_bool apc_cache_entry_soft_expired(
 		apc_cache_t *cache, apc_cache_entry_t *entry, time_t t) {
-	return !entry->ttl && cache->ttl && (time_t) (entry->atime + cache->ttl) < t;
+	return cache->ttl && (time_t) (entry->atime + cache->ttl) < t;
 }
 
 static zend_bool apc_cache_entry_expired(
@@ -273,7 +273,7 @@ PHP_APCU_API int APC_UNSERIALIZER_NAME(php) (APC_UNSERIALIZER_ARGS)
 	result = php_var_unserialize(value, &tmp, buf + buf_len, &var_hash);
 	PHP_VAR_UNSERIALIZE_DESTROY(var_hash);
 	BG(serialize_lock)--;
-	
+
 	if (!result) {
 		php_error_docref(NULL, E_NOTICE, "Error at offset %ld of %ld bytes", (zend_long)(tmp - buf), (zend_long)buf_len);
 		ZVAL_NULL(value);
