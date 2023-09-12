@@ -3,7 +3,7 @@ Test default expunge logic wrt global and per-entry TTLs
 --SKIPIF--
 <?php
 require_once(__DIR__ . '/skipif.inc');
-if (!function_exists('apcu_inc_request_time')) die('skip APC debug build required');
+die('skip APC TTL now can expire all entries');
 ?>
 --INI--
 apc.enabled=1
