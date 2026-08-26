@@ -91,6 +91,7 @@
     <file name="apcu_fetch_empty_array_reference.phpt" role="test" />
     <file name="apc_inc_perf.phpt" role="test" />
     <file name="apc_repeated_unpersist.phpt" role="test" />
+    <file name="apc_soft_expired.phpt" role="test" />
     <file name="apc_store_array_int_keys.phpt" role="test" />
     <file name="apc_store_array_with_refs.phpt" role="test" />
     <file name="apc_store_reference.phpt" role="test" />

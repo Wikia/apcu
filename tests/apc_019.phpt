@@ -1,9 +1,9 @@
 --TEST--
-The per-entry TTL should take precedence over the global TTL
+The global TTL may soft-expire entries with a per-entry TTL
 --SKIPIF--
 <?php
 require_once(__DIR__ . '/skipif.inc');
-die('skip APC TTL now can expire all entries');
+if (!function_exists('apcu_inc_request_time')) die('skip APC debug build required');
 ?>
 --INI--
 apc.enabled=1
@@ -34,7 +34,7 @@ var_dump(apcu_fetch("EzFY"));
 --EXPECT--
 T+2
 bool(false)
-int(42)
+bool(false)
 T+4
 bool(false)
 bool(false)
