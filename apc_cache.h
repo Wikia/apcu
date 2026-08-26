@@ -46,12 +46,10 @@ struct apc_cache_slam_key_t {
 #endif
 };
 
-/* {{{ struct definition: apc_cache_entry_t */
 typedef struct apc_cache_entry_t apc_cache_entry_t;
 struct apc_cache_entry_t {
-	zend_string *key;        /* entry key */
-	zval val;                /* the zval copied at store time */
-	apc_cache_entry_t *next; /* next entry in linked list */
+	uintptr_t next;          /* offset to next entry (MUST BE THE 1st FIELD OF THE STRUCT!) */
+	uintptr_t prev;          /* offset to previous entry / head-pointer of the linked list */
 	zend_long ttl;           /* the ttl on this specific entry */
 	zend_long ref_count;     /* the reference count of this entry */
 	zend_long nhits;         /* number of hits to this entry */
@@ -60,44 +58,41 @@ struct apc_cache_entry_t {
 	time_t dtime;            /* time entry was removed from cache */
 	time_t atime;            /* time entry was last accessed */
 	zend_long mem_size;      /* memory used */
+	zval val;                /* the zval copied at store time */
+	zend_string key;         /* entry key (MUST BE THE LAST FIELD OF THE STRUCT!) */
 };
-/* }}} */
 
-/* {{{ struct definition: apc_cache_header_t
-   Any values that must be shared among processes should go in here. */
+/* Any values that must be shared among processes should go in here. */
 typedef struct _apc_cache_header_t {
 	apc_lock_t lock;                /* header lock */
 	zend_long nhits;                /* hit count */
 	zend_long nmisses;              /* miss count */
 	zend_long ninserts;             /* insert count */
-	zend_long nexpunges;            /* expunge count */
+	zend_long ncleanups;            /* default expunge count */
+	zend_long ndefragmentations;    /* defragmentation count */
+	zend_long nexpunges;            /* real expunge count */
 	zend_long nentries;             /* entry count */
 	zend_long mem_size;             /* used */
 	time_t stime;                   /* start time */
-	unsigned short state;           /* cache state */
 	apc_cache_slam_key_t lastkey;   /* last key inserted (not necessarily without error) */
-	apc_cache_entry_t *gc;          /* gc list */
-} apc_cache_header_t; /* }}} */
+	uintptr_t gc;                   /* offset in shm to the first entry of gc list */
+} apc_cache_header_t;
 
-/* {{{ struct definition: apc_cache_t */
 typedef struct _apc_cache_t {
-	void* shmaddr;                /* process (local) address of shared cache */
 	apc_cache_header_t* header;   /* cache header (stored in SHM) */
-	apc_cache_entry_t** slots;    /* array of cache slots (stored in SHM) */
+	uintptr_t* slots;             /* array of cache slots (stored in SHM) */
 	apc_sma_t* sma;               /* shared memory allocator */
 	apc_serializer_t* serializer; /* serializer */
 	size_t nslots;                /* number of slots in cache */
-	zend_long gc_ttl;            /* maximum time on GC list for a entry */
-	zend_long ttl;               /* if slot is needed and entry's access time is older than this ttl, remove it */
-	zend_long smart;             /* smart parameter for gc */
+	zend_long gc_ttl;             /* maximum time on GC list for a entry */
+	zend_long ttl;                /* if slot is needed and entry's access time is older than this ttl, remove it */
+	zend_long smart;              /* smart parameter for gc */
 	zend_bool defend;             /* defense parameter for runtime */
-} apc_cache_t; /* }}} */
+} apc_cache_t;
 
-/* {{{ typedef: apc_cache_updater_t */
-typedef zend_bool (*apc_cache_updater_t)(apc_cache_t*, apc_cache_entry_t*, void* data); /* }}} */
+typedef zend_bool (*apc_cache_updater_t)(apc_cache_t*, apc_cache_entry_t*, void* data);
 
-/* {{{ typedef: apc_cache_atomic_updater_t */
-typedef zend_bool (*apc_cache_atomic_updater_t)(apc_cache_t*, zend_long*, void* data); /* }}} */
+typedef zend_bool (*apc_cache_atomic_updater_t)(apc_cache_t*, zend_long*, void* data);
 
 /*
  * apc_cache_create creates the shared memory cache.
@@ -128,6 +123,7 @@ typedef zend_bool (*apc_cache_atomic_updater_t)(apc_cache_t*, zend_long*, void* 
 PHP_APCU_API apc_cache_t* apc_cache_create(
         apc_sma_t* sma, apc_serializer_t* serializer, zend_long size_hint,
         zend_long gc_ttl, zend_long ttl, zend_long smart, zend_bool defend);
+
 /*
 * apc_cache_preload preloads the data at path into the specified cache
 */
@@ -151,6 +147,7 @@ PHP_APCU_API void apc_cache_clear(apc_cache_t* cache);
 PHP_APCU_API zend_bool apc_cache_store(
         apc_cache_t* cache, zend_string *key, const zval *val,
         const int32_t ttl, const zend_bool exclusive);
+
 /*
  * apc_cache_update updates an entry in place. The updater function must not bailout.
  * The update is performed under write-lock and doesn't have to be atomic.
@@ -168,15 +165,7 @@ PHP_APCU_API zend_bool apc_cache_atomic_update_long(
 		zend_bool insert_if_not_found, zend_long ttl);
 
 /*
- * apc_cache_find searches for a cache entry by its hashed identifier,
- * and returns a pointer to the entry if found, NULL otherwise.
- *
- */
-PHP_APCU_API apc_cache_entry_t* apc_cache_find(apc_cache_t* cache, zend_string *key, time_t t);
-
-/*
  * apc_cache_fetch fetches an entry from the cache directly into dst
- *
  */
 PHP_APCU_API zend_bool apc_cache_fetch(apc_cache_t* cache, zend_string *key, time_t t, zval *dst);
 
@@ -191,14 +180,15 @@ PHP_APCU_API zend_bool apc_cache_exists(apc_cache_t* cache, zend_string *key, ti
  */
 PHP_APCU_API zend_bool apc_cache_delete(apc_cache_t* cache, zend_string *key);
 
-/* apc_cache_fetch_zval copies a cache entry value to be usable at runtime.
+/*
+ * apc_cache_fetch_zval copies a cache entry value to be usable at runtime.
  */
 PHP_APCU_API zend_bool apc_cache_entry_fetch_zval(
 		apc_cache_t *cache, apc_cache_entry_t *entry, zval *dst);
 
 /*
  * apc_cache_entry_release decrements the reference count associated with a cache
- * entry. Calling apc_cache_find automatically increments the reference count,
+ * entry. Calling apc_cache_rlocked_find_incref automatically increments the reference count,
  * and this function must be called post-execution to return the count to its
  * original value. Failing to do so will prevent the entry from being
  * garbage-collected.
@@ -208,20 +198,20 @@ PHP_APCU_API zend_bool apc_cache_entry_fetch_zval(
 PHP_APCU_API void apc_cache_entry_release(apc_cache_t *cache, apc_cache_entry_t *entry);
 
 /*
- fetches information about the cache provided for userland status functions
-*/
+ * fetches information about the cache provided for userland status functions
+ */
 PHP_APCU_API zend_bool apc_cache_info(zval *info, apc_cache_t *cache, zend_bool limited);
 
 /*
- fetches information about the key provided
-*/
+ * fetches information about the key provided
+ */
 PHP_APCU_API void apc_cache_stat(apc_cache_t *cache, zend_string *key, zval *stat);
 
 /*
 * apc_cache_defense: guard against slamming a key
-*  will return true if the following conditions are met:
-*	the key provided has a matching hash and length to the last key inserted into cache
-*   the last key has a different owner
+* will return true if the following conditions are met:
+*  - the key provided has a matching hash and length to the last key inserted into cache
+*  - the last key has a different owner
 * in ZTS mode, TSRM determines owner
 * in non-ZTS mode, PID determines owner
 * Note: this function sets the owner of key during execution
@@ -229,8 +219,7 @@ PHP_APCU_API void apc_cache_stat(apc_cache_t *cache, zend_string *key, zval *sta
 PHP_APCU_API zend_bool apc_cache_defense(apc_cache_t *cache, zend_string *key, time_t t);
 
 /*
-* apc_cache_serializer
-* sets the serializer for a cache, and by proxy contexts created for the cache
+* apc_cache_serializer sets the serializer for a cache, and by proxy contexts created for the cache.
 * Note: this avoids race conditions between third party serializers and APCu
 */
 PHP_APCU_API void apc_cache_serializer(apc_cache_t* cache, const char* name);
@@ -249,26 +238,22 @@ PHP_APCU_API void apc_cache_serializer(apc_cache_t* cache, const char* name);
 * Note: beware of locking (copy it exactly), setting states is also important
 */
 
-/* {{{ apc_cache_default_expunge
+/*
+* apc_cache_default_expunge() is executed by the sma layer when there is not enough
+* free shared memory to satisfy an allocation request. It attempts to free memory
+* (e.g., by removing entries) so that the allocation request can be satisfied.
+*
 * Where smart is not set:
-*  Where no ttl is set on cache:
-*   1) Perform cleanup of stale entries
-*   2) Expunge if available memory is less than sma->size/2
-*  Where ttl is set on cache:
-*   1) Perform cleanup of stale entries
-*   2) If available memory if less than the size requested, run full expunge
+*  1) Perform cleanup of stale entries
+*  2) If available memory is less than the size requested, run full expunge
 *
 * Where smart is set:
-*  Where no ttl is set on cache:
-*   1) Perform cleanup of stale entries
-*   2) Expunge is available memory is less than size * smart
-*  Where ttl is set on cache:
-*   1) Perform cleanup of stale entries
-*   2) If available memory if less than the size requested, run full expunge
+*  1) Perform cleanup of stale entries
+*  2) If available memory is less than the size requested * smart, run full expunge
 *
 * The TTL of an entry takes precedence over the TTL of a cache
 */
-PHP_APCU_API void apc_cache_default_expunge(apc_cache_t* cache, size_t size);
+PHP_APCU_API zend_bool apc_cache_default_expunge(apc_cache_t* cache, size_t size);
 
 /*
 * apc_cache_entry: generate and create or fetch an entry
@@ -313,6 +298,15 @@ static inline void apc_cache_runlock(apc_cache_t *cache) {
 		RUNLOCK(&cache->header->lock);
 	}
 }
+
+/* APC_ENTRY_SIZE takes into account the trailing key-string + terminating 0-byte */
+#define APC_ENTRY_SIZE(key_len) (ZEND_MM_ALIGNED_SIZE(XtOffsetOf(apc_cache_entry_t, key.val) + key_len + 1))
+
+/* ENTRYAT and ENTRYOF are used to convert between offsets and pointers to cache entries.
+ * Both expect the presence of cache->header that points to the cache header in the
+ * shared memory segment. */
+#define ENTRYAT(offset) ((apc_cache_entry_t *)((uintptr_t)cache->header + (uintptr_t)offset))
+#define ENTRYOF(entry) (((uintptr_t)entry) - (uintptr_t)cache->header)
 
 #endif
 

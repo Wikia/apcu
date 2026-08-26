@@ -53,7 +53,7 @@ typedef struct _apc_persist_context_t {
 	/* Serialized object/array string, in case there can only be one */
 	unsigned char *serialized_str;
 	size_t serialized_str_len;
-	/* Whole SMA allocation */
+	/* Address (process local) of entry in shm / Whole SMA allocation */
 	char *alloc;
 	/* Current position in allocation */
 	char *alloc_cur;
@@ -69,8 +69,20 @@ typedef struct _apc_persist_context_t {
 #define ALLOC(sz) apc_persist_alloc(ctxt, sz)
 #define COPY(val, sz) apc_persist_alloc_copy(ctxt, val, sz)
 
+/* TO_OFF() converts a (process local) pointer from an entry (in shm) to an
+ * offset relative to the beginning of this entry. It expects the presence
+ * of a variable ctxt that points to an apc_persist_context_t. */
+#define TO_OFF(ptr) (apc_persist_compute_offset(ptr, ctxt))
+
 static zend_bool apc_persist_calc_zval(apc_persist_context_t *ctxt, const zval *zv);
 static void apc_persist_copy_zval_impl(apc_persist_context_t *ctxt, zval *zv);
+
+static inline void *apc_persist_compute_offset(void *ptr, apc_persist_context_t *ctxt) {
+	/* The pointer must point to the shm area of the entry to be persisted */
+	assert(((uintptr_t)ptr >= (uintptr_t)ctxt->alloc) && ((uintptr_t)ptr < ((uintptr_t)ctxt->alloc + (uintptr_t)ctxt->size)));
+
+	return ((void *)((uintptr_t)ptr - (uintptr_t)ctxt->alloc));
+}
 
 /* Used to reduce hash collisions when using pointers in hash tables. (#175) */
 static inline zend_ulong apc_shr3(zend_ulong index) {
@@ -84,9 +96,10 @@ static inline void apc_persist_copy_zval(apc_persist_context_t *ctxt, zval *zv) 
 	}
 
 	apc_persist_copy_zval_impl(ctxt, zv);
+	Z_PTR_P(zv) = TO_OFF(Z_PTR_P(zv));
 }
 
-void apc_persist_init_context(apc_persist_context_t *ctxt, apc_serializer_t *serializer) {
+static void apc_persist_init_context(apc_persist_context_t *ctxt, apc_serializer_t *serializer) {
 	ctxt->serializer = serializer;
 	ctxt->size = 0;
 	ctxt->memoization_needed = 0;
@@ -97,7 +110,7 @@ void apc_persist_init_context(apc_persist_context_t *ctxt, apc_serializer_t *ser
 	ctxt->alloc_cur = NULL;
 }
 
-void apc_persist_destroy_context(apc_persist_context_t *ctxt) {
+static void apc_persist_destroy_context(apc_persist_context_t *ctxt) {
 	if (ctxt->memoization_needed) {
 		zend_hash_destroy(&ctxt->already_counted);
 		zend_hash_destroy(&ctxt->already_allocated);
@@ -235,10 +248,10 @@ static zend_bool apc_persist_calc_zval(apc_persist_context_t *ctxt, const zval *
 	}
 }
 
-static zend_bool apc_persist_calc(apc_persist_context_t *ctxt, const apc_cache_entry_t *entry) {
-	ADD_SIZE(sizeof(apc_cache_entry_t));
-	ADD_SIZE_STR(ZSTR_LEN(entry->key));
-	return apc_persist_calc_zval(ctxt, &entry->val);
+static zend_bool apc_persist_calc(apc_persist_context_t *ctxt, const zend_string *key, const zval *zv) {
+	ADD_SIZE(APC_ENTRY_SIZE(ZSTR_LEN(key)));
+
+	return apc_persist_calc_zval(ctxt, zv);
 }
 
 static inline void *apc_persist_get_already_allocated(apc_persist_context_t *ctxt, void *ptr) {
@@ -320,7 +333,8 @@ static const uint32_t uninitialized_bucket[-HT_MIN_MASK] = {HT_INVALID_IDX, HT_I
 static zend_array *apc_persist_copy_ht(apc_persist_context_t *ctxt, const HashTable *orig_ht) {
 #if PHP_VERSION_ID >= 70300
 	if (orig_ht->nNumOfElements == 0) {
-		return (HashTable *)&zend_empty_array;
+		/* To indicate using zend_empty_array during unpersist, we point to the entry's starting address. */
+		return (HashTable *)ctxt->alloc;
 	}
 #endif
 	HashTable *ht = COPY(orig_ht, sizeof(HashTable));
@@ -368,6 +382,8 @@ static zend_array *apc_persist_copy_ht(apc_persist_context_t *ctxt, const HashTa
 
 			apc_persist_copy_zval(ctxt, val);
 		}
+
+		ht->arPacked = TO_OFF(ht->arPacked);
 	} else
 #endif
 	{
@@ -382,6 +398,7 @@ static zend_array *apc_persist_copy_ht(apc_persist_context_t *ctxt, const HashTa
 
 			if (p->key) {
 				p->key = apc_persist_copy_zstr_no_add(ctxt, p->key);
+				p->key = TO_OFF(p->key);
 				ht->u.flags &= ~HASH_FLAG_STATIC_KEYS;
 			} else if ((zend_long) p->h >= (zend_long) ht->nNextFreeElement) {
 				ht->nNextFreeElement = p->h + 1;
@@ -389,6 +406,8 @@ static zend_array *apc_persist_copy_ht(apc_persist_context_t *ctxt, const HashTa
 
 			apc_persist_copy_zval(ctxt, &p->val);
 		}
+
+		ht->arData = TO_OFF(ht->arData);
 	}
 
 	return ht;
@@ -435,27 +454,47 @@ static void apc_persist_copy_zval_impl(apc_persist_context_t *ctxt, zval *zv) {
 	}
 }
 
-static apc_cache_entry_t *apc_persist_copy(
-		apc_persist_context_t *ctxt, const apc_cache_entry_t *orig_entry) {
-	apc_cache_entry_t *entry = COPY(orig_entry, sizeof(apc_cache_entry_t));
-	entry->key = apc_persist_copy_zstr_no_add(ctxt, entry->key);
+static apc_cache_entry_t *apc_persist_create_entry(
+		apc_persist_context_t *ctxt, zend_string *key, const zval *zv)
+{
+	/* Get memory for the entry (incl. key) */
+	apc_cache_entry_t *entry = ALLOC(APC_ENTRY_SIZE(ZSTR_LEN(key)));
+
+	/* Deep copy of the key */
+	GC_SET_REFCOUNT(&entry->key, 1);
+	GC_SET_PERSISTENT_TYPE(&entry->key, IS_STRING);
+	ZSTR_LEN(&entry->key) = ZSTR_LEN(key);
+	memcpy(ZSTR_VAL(&entry->key), ZSTR_VAL(key), ZSTR_LEN(key));
+	ZSTR_VAL(&entry->key)[ZSTR_LEN(key)] = '\0';
+	ZSTR_H(&entry->key) = zend_string_hash_val(key);
+
+	/* Deep copy of the value */
+	ZVAL_COPY_VALUE(&entry->val, zv);
 	apc_persist_copy_zval(ctxt, &entry->val);
+
 	return entry;
 }
 
+static void apc_persist_sma_init_entry(apc_cache_entry_t *entry) {
+	/* The ref_count must be initialized during allocation. This ensures that the entry
+	 * is not moved by defragmentation before all persistence operations are completed
+	 * and the entry is stored in the hash table. */
+	entry->ref_count = 1;
+}
+
 apc_cache_entry_t *apc_persist(
-		apc_sma_t *sma, apc_serializer_t *serializer, const apc_cache_entry_t *orig_entry) {
+		apc_sma_t *sma, apc_serializer_t *serializer, zend_string *key, const zval *val) {
 	apc_persist_context_t ctxt;
 	apc_cache_entry_t *entry;
 
 	apc_persist_init_context(&ctxt, serializer);
 
 	/* The top-level value should never be a reference */
-	ZEND_ASSERT(Z_TYPE(orig_entry->val) != IS_REFERENCE);
+	ZEND_ASSERT(Z_TYPE_P(val) != IS_REFERENCE);
 
 	/* If we're serializing an array using the default serializer, we will have
 	 * to keep track of potentially repeated refcounted structures. */
-	if (!serializer && Z_TYPE(orig_entry->val) == IS_ARRAY) {
+	if (!serializer && Z_TYPE_P(val) == IS_ARRAY) {
 		ctxt.memoization_needed = 1;
 		zend_hash_init(&ctxt.already_counted, 0, NULL, NULL, 0);
 		zend_hash_init(&ctxt.already_allocated, 0, NULL, NULL, 0);
@@ -463,12 +502,12 @@ apc_cache_entry_t *apc_persist(
 
 	/* Objects are always serialized, and arrays when a serializer is set.
 	 * Other cases are detected during apc_persist_calc(). */
-	if (Z_TYPE(orig_entry->val) == IS_OBJECT
-			|| (serializer && Z_TYPE(orig_entry->val) == IS_ARRAY)) {
+	if (Z_TYPE_P(val) == IS_OBJECT
+			|| (serializer && Z_TYPE_P(val) == IS_ARRAY)) {
 		ctxt.use_serialization = 1;
 	}
 
-	if (!apc_persist_calc(&ctxt, orig_entry)) {
+	if (!apc_persist_calc(&ctxt, key, val)) {
 		if (!ctxt.use_serialization) {
 			apc_persist_destroy_context(&ctxt);
 			return NULL;
@@ -478,19 +517,19 @@ apc_cache_entry_t *apc_persist(
 		apc_persist_destroy_context(&ctxt);
 		apc_persist_init_context(&ctxt, serializer);
 		ctxt.use_serialization = 1;
-		if (!apc_persist_calc(&ctxt, orig_entry)) {
+		if (!apc_persist_calc(&ctxt, key, val)) {
 			apc_persist_destroy_context(&ctxt);
 			return NULL;
 		}
 	}
 
-	ctxt.alloc = ctxt.alloc_cur = apc_sma_malloc(sma, ctxt.size);
+	ctxt.alloc = ctxt.alloc_cur = apc_sma_malloc(sma, ctxt.size, (apc_sma_malloc_init_f)apc_persist_sma_init_entry);
 	if (!ctxt.alloc) {
 		apc_persist_destroy_context(&ctxt);
 		return NULL;
 	}
 
-	entry = apc_persist_copy(&ctxt, orig_entry);
+	entry = apc_persist_create_entry(&ctxt, key, val);
 	ZEND_ASSERT(ctxt.alloc_cur == ctxt.alloc + ctxt.size);
 
 	entry->mem_size = ctxt.size;
@@ -508,9 +547,23 @@ typedef struct _apc_unpersist_context_t {
 	zend_bool memoization_needed;
 	/* HashTable storing already copied refcounteds. */
 	HashTable already_copied;
+	/* Address (process local) of entry in shm / Whole SMA allocation */
+	char *alloc;
 } apc_unpersist_context_t;
 
+/* TO_PTR() does the opposite of TO_OFF() and converts an offset stored in an entry (in shm)
+ * into a (process local) pointer, which can then be used to access an element of that entry.
+ * It expects the presence of a variable ctxt that points to an apc_unpersist_context_t. */
+#define TO_PTR(off) (apc_unpersist_compute_pointer(off, ctxt))
+
 static void apc_unpersist_zval_impl(apc_unpersist_context_t *ctxt, zval *zv);
+
+static inline void *apc_unpersist_compute_pointer(void *off, apc_unpersist_context_t *ctxt) {
+	/* The offset must be smaller than the size of the entry (in shm) to be unpersisted */
+	assert((uintptr_t)off < (uintptr_t)((apc_cache_entry_t *)ctxt->alloc)->mem_size);
+
+	return (void *)((uintptr_t)ctxt->alloc + (uintptr_t)off);
+}
 
 static inline void apc_unpersist_zval(apc_unpersist_context_t *ctxt, zval *zv) {
 	/* No data apart from the zval itself */
@@ -518,11 +571,12 @@ static inline void apc_unpersist_zval(apc_unpersist_context_t *ctxt, zval *zv) {
 		return;
 	}
 
+	Z_PTR_P(zv) = TO_PTR(Z_PTR_P(zv));
 	apc_unpersist_zval_impl(ctxt, zv);
 }
 
 static zend_bool apc_unpersist_serialized(
-		zval *dst, zend_string *str, apc_serializer_t *serializer) {
+		apc_unpersist_context_t *ctxt, zval *dst, zend_string *str, apc_serializer_t *serializer) {
 	apc_unserialize_t unserialize = APC_UNSERIALIZER_NAME(php);
 	void *config = NULL;
 
@@ -531,6 +585,7 @@ static zend_bool apc_unpersist_serialized(
 		config = serializer->config;
 	}
 
+	str = TO_PTR(str);
 	if (unserialize(dst, (unsigned char *) ZSTR_VAL(str), ZSTR_LEN(str), config)) {
 		return 1;
 	}
@@ -604,11 +659,11 @@ static zend_array *apc_unpersist_ht(
 #endif
 
 	HT_SET_DATA_ADDR(ht, emalloc(apc_compute_ht_data_size(ht)));
-	memcpy(HT_GET_DATA_ADDR(ht), HT_GET_DATA_ADDR(orig_ht), HT_HASH_SIZE(ht->nTableMask));
+	memcpy(HT_GET_DATA_ADDR(ht), TO_PTR(HT_GET_DATA_ADDR(orig_ht)), HT_HASH_SIZE(ht->nTableMask));
 
 #if PHP_VERSION_ID >= 80200
 	if (HT_IS_PACKED(ht)) {
-		zval *p = ht->arPacked, *q = orig_ht->arPacked, *p_end = p + ht->nNumUsed;
+		zval *p = ht->arPacked, *q = TO_PTR(orig_ht->arPacked), *p_end = p + ht->nNumUsed;
 		for (; p < p_end; p++, q++) {
 			*p = *q;
 			apc_unpersist_zval(ctxt, p);
@@ -616,14 +671,14 @@ static zend_array *apc_unpersist_ht(
 	} else
 #endif
 	if (ht->u.flags & HASH_FLAG_STATIC_KEYS) {
-		Bucket *p = ht->arData, *q = orig_ht->arData, *p_end = p + ht->nNumUsed;
+		Bucket *p = ht->arData, *q = TO_PTR(orig_ht->arData), *p_end = p + ht->nNumUsed;
 		for (; p < p_end; p++, q++) {
 			/* No need to check for UNDEF, as unpersist_zval can be safely called on UNDEF */
 			*p = *q;
 			apc_unpersist_zval(ctxt, &p->val);
 		}
 	} else {
-		Bucket *p = ht->arData, *q = orig_ht->arData, *p_end = p + ht->nNumUsed;
+		Bucket *p = ht->arData, *q = TO_PTR(orig_ht->arData), *p_end = p + ht->nNumUsed;
 		for (; p < p_end; p++, q++) {
 			if (Z_TYPE(q->val) == IS_UNDEF) {
 				ZVAL_UNDEF(&p->val);
@@ -633,7 +688,7 @@ static zend_array *apc_unpersist_ht(
 			p->val = q->val;
 			p->h = q->h;
 			if (q->key) {
-				p->key = zend_string_dup(q->key, 0);
+				p->key = zend_string_dup(TO_PTR(q->key), 0);
 			} else {
 				p->key = NULL;
 			}
@@ -661,7 +716,8 @@ static void apc_unpersist_zval_impl(apc_unpersist_context_t *ctxt, zval *zv) {
 			return;
 		case IS_ARRAY:
 #if PHP_VERSION_ID >= 70300
-			if (Z_ARR_P(zv)->nNumOfElements == 0) {
+			if (Z_ARR_P(zv) == (zend_array *)ctxt->alloc) {
+				/* If the zval points to the entry's starting address, we use the zend_empty_array optimization. */
 				ZVAL_EMPTY_ARRAY(zv); /* #323 */
 				return;
 			}
@@ -674,21 +730,24 @@ static void apc_unpersist_zval_impl(apc_unpersist_context_t *ctxt, zval *zv) {
 	}
 }
 
-zend_bool apc_unpersist(zval *dst, const zval *value, apc_serializer_t *serializer) {
+zend_bool apc_unpersist(zval *dst, const apc_cache_entry_t *entry, apc_serializer_t *serializer) {
 	apc_unpersist_context_t ctxt;
 
-	if (Z_TYPE_P(value) == IS_PTR) {
-		return apc_unpersist_serialized(dst, Z_PTR_P(value), serializer);
+	/* Needed to convert offsets back to pointers */
+	ctxt.alloc = (char *)entry;
+
+	if (Z_TYPE(entry->val) == IS_PTR) {
+		return apc_unpersist_serialized(&ctxt, dst, Z_PTR(entry->val), serializer);
 	}
 
 	ctxt.memoization_needed = 0;
-	ZEND_ASSERT(Z_TYPE_P(value) != IS_REFERENCE);
-	if (Z_TYPE_P(value) == IS_ARRAY) {
+	ZEND_ASSERT(Z_TYPE(entry->val) != IS_REFERENCE);
+	if (Z_TYPE(entry->val) == IS_ARRAY) {
 		ctxt.memoization_needed = 1;
 		zend_hash_init(&ctxt.already_copied, 0, NULL, NULL, 0);
 	}
 
-	ZVAL_COPY_VALUE(dst, value);
+	ZVAL_COPY_VALUE(dst, &entry->val);
 	apc_unpersist_zval(&ctxt, dst);
 
 	if (ctxt.memoization_needed) {

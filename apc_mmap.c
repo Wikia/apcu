@@ -29,7 +29,7 @@
 #include "apc_mmap.h"
 #include "apc_lock.h"
 
-#if APC_MMAP
+#ifdef APC_MMAP
 
 #include <fcntl.h>
 #include <sys/types.h>
@@ -51,41 +51,58 @@
 # define MAP_ANON MAP_ANONYMOUS
 #endif
 
-apc_segment_t apc_mmap(char *file_mask, size_t size)
+static int apc_mmap_hugepage_flags(size_t size, zend_long hugepage_size)
 {
-	apc_segment_t segment;
+	if (!hugepage_size) return 0; // not use hugepages
 
+#if defined(MAP_HUGETLB) && defined(MAP_HUGE_MASK) && defined(MAP_HUGE_SHIFT)
+	if (size % hugepage_size) {
+		zend_error_noreturn(E_CORE_ERROR, "apc.shm_size must be a multiple of apc.mmap_hugepage_size");
+	}
+
+	zend_long page_size = hugepage_size;
+	int log2_page_size = -1;
+
+	// calculate log2 of hugepage size
+	while (page_size) {
+		page_size >>= 1;
+		log2_page_size++;
+	}
+
+	if (!log2_page_size || (log2_page_size & MAP_HUGE_MASK) != log2_page_size) {
+		// maybe hugepage size is too large or small
+		zend_error_noreturn(E_CORE_ERROR, "Invalid hugepage size: %ld", hugepage_size);
+	}
+
+	return MAP_HUGETLB | ((unsigned int)log2_page_size << MAP_HUGE_SHIFT);
+#else
+	zend_error_noreturn(E_CORE_ERROR, "This system does not support hugepages");
+#endif
+}
+
+void *apc_mmap(char *file_mask, size_t size, zend_long hugepage_size)
+{
+	void *shmaddr;
 	int fd = -1;
 	int flags = MAP_SHARED | MAP_NOSYNC;
-#ifdef APC_MEMPROTECT
-	int remap = 1;
-#endif
 
 	/* If no filename was provided, do an anonymous mmap */
-	if(!file_mask || (file_mask && !strlen(file_mask))) {
+	if (!file_mask || (file_mask && !strlen(file_mask))) {
 #if !defined(MAP_ANON)
 		zend_error_noreturn(E_CORE_ERROR, "Anonymous mmap does not appear to be available on this system (MAP_ANON/MAP_ANONYMOUS).  Please see the apc.mmap_file_mask INI option.");
 #else
 		fd = -1;
 		flags = MAP_SHARED | MAP_ANON;
-#ifdef APC_MEMPROTECT
-		remap = 0;
 #endif
-#endif
-	} else if(!strcmp(file_mask,"/dev/zero")) {
+	} else if (!strcmp(file_mask,"/dev/zero")) {
 		fd = open("/dev/zero", O_RDWR, S_IRUSR | S_IWUSR);
-		if(fd == -1) {
+		if (fd == -1) {
 			zend_error_noreturn(E_CORE_ERROR, "apc_mmap: open on /dev/zero failed");
 		}
-#ifdef APC_MEMPROTECT
-		remap = 0; /* cannot remap */
-#endif
 	} else {
-		/*
-		 * Otherwise we do a normal filesystem mmap
-		 */
+		/* Otherwise we do a normal filesystem mmap */
 		fd = mkstemp(file_mask);
-		if(fd == -1) {
+		if (fd == -1) {
 			zend_error_noreturn(E_CORE_ERROR, "apc_mmap: mkstemp on %s failed", file_mask);
 		}
 		if (ftruncate(fd, size) < 0) {
@@ -96,44 +113,34 @@ apc_segment_t apc_mmap(char *file_mask, size_t size)
 		unlink(file_mask);
 	}
 
-	segment.shmaddr = (void *)mmap(NULL, size, PROT_READ | PROT_WRITE, flags, fd, 0);
-	segment.size = size;
+	flags |= apc_mmap_hugepage_flags(size, hugepage_size);
+	shmaddr = (void *)mmap(NULL, size, PROT_READ | PROT_WRITE, flags, fd, 0);
 
-#ifdef APC_MEMPROTECT
-	if(remap) {
-		segment.roaddr = (void *)mmap(NULL, size, PROT_READ, flags, fd, 0);
-	} else {
-		segment.roaddr = NULL;
-	}
-#endif
-
-	if ((long)segment.shmaddr == -1) {
-		zend_error_noreturn(E_CORE_ERROR, "apc_mmap: Failed to mmap %zu bytes. Is your apc.shm_size too large?", size);
+	if ((long)shmaddr == -1) {
+		if (hugepage_size) {
+			zend_error_noreturn(E_CORE_ERROR, "apc_mmap: Failed to mmap %zu bytes with hugepage size %ld. apc.shm_size may be too large, apc.mmap_hugepage_size may be invalid, or the system lacks sufficient reserved hugepages.", size, hugepage_size);
+		} else {
+			zend_error_noreturn(E_CORE_ERROR, "apc_mmap: Failed to mmap %zu bytes. apc.shm_size may be too large.", size);
+		}
 	}
 
 #ifdef MADV_HUGEPAGE
-	/* enable transparent huge pages to reduce TLB misses (Linux
-	   only) */
-	madvise(segment.shmaddr, size, MADV_HUGEPAGE);
+	/* enable transparent huge pages to reduce TLB misses (Linux only) */
+	if (!hugepage_size) {
+		madvise(shmaddr, size, MADV_HUGEPAGE);
+	}
 #endif
 
 	if (fd != -1) close(fd);
 
-	return segment;
+	return shmaddr;
 }
 
-void apc_unmap(apc_segment_t *segment)
+void apc_unmap(void *shmaddr, size_t size)
 {
-	if (munmap(segment->shmaddr, segment->size) < 0) {
+	if (munmap(shmaddr, size) < 0) {
 		apc_warning("apc_unmap: munmap failed");
 	}
-
-#ifdef APC_MEMPROTECT
-	if (segment->roaddr && munmap(segment->roaddr, segment->size) < 0) {
-		apc_warning("apc_unmap: munmap failed");
-	}
-#endif
-
 }
 
 #endif
