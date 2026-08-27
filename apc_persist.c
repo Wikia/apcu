@@ -333,7 +333,8 @@ static const uint32_t uninitialized_bucket[-HT_MIN_MASK] = {HT_INVALID_IDX, HT_I
 static zend_array *apc_persist_copy_ht(apc_persist_context_t *ctxt, const HashTable *orig_ht) {
 #if PHP_VERSION_ID >= 70300
 	if (orig_ht->nNumOfElements == 0) {
-		return (HashTable *)&zend_empty_array;
+		/* To indicate using zend_empty_array during unpersist, we point to the entry's starting address. */
+		return (HashTable *)ctxt->alloc;
 	}
 #endif
 	HashTable *ht = COPY(orig_ht, sizeof(HashTable));
@@ -474,6 +475,13 @@ static apc_cache_entry_t *apc_persist_create_entry(
 	return entry;
 }
 
+static void apc_persist_sma_init_entry(apc_cache_entry_t *entry) {
+	/* The ref_count must be initialized during allocation. This ensures that the entry
+	 * is not moved by defragmentation before all persistence operations are completed
+	 * and the entry is stored in the hash table. */
+	entry->ref_count = 1;
+}
+
 apc_cache_entry_t *apc_persist(
 		apc_sma_t *sma, apc_serializer_t *serializer, zend_string *key, const zval *val) {
 	apc_persist_context_t ctxt;
@@ -515,7 +523,7 @@ apc_cache_entry_t *apc_persist(
 		}
 	}
 
-	ctxt.alloc = ctxt.alloc_cur = apc_sma_malloc(sma, ctxt.size);
+	ctxt.alloc = ctxt.alloc_cur = apc_sma_malloc(sma, ctxt.size, (apc_sma_malloc_init_f)apc_persist_sma_init_entry);
 	if (!ctxt.alloc) {
 		apc_persist_destroy_context(&ctxt);
 		return NULL;
@@ -708,7 +716,8 @@ static void apc_unpersist_zval_impl(apc_unpersist_context_t *ctxt, zval *zv) {
 			return;
 		case IS_ARRAY:
 #if PHP_VERSION_ID >= 70300
-			if (Z_ARR_P(zv)->nNumOfElements == 0) {
+			if (Z_ARR_P(zv) == (zend_array *)ctxt->alloc) {
+				/* If the zval points to the entry's starting address, we use the zend_empty_array optimization. */
 				ZVAL_EMPTY_ARRAY(zv); /* #323 */
 				return;
 			}
