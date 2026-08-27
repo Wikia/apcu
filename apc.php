@@ -87,7 +87,7 @@ $vardom=array(
     'SORT1' => '/^[AHSMCDTZ]$/',    // first sort key
     'SORT2' => '/^[DA]$/',          // second sort key
     'AGGR'  => '/^\d+$/',           // aggregation by dir level
-    'SEARCH'    => '~^[a-zA-Z0-9/_.-]*$~'           // aggregation by dir level
+    'SEARCH' => '/^.*$/'            // search regex
 );
 
 // cache scope
@@ -766,6 +766,8 @@ case OB_HOST_STATS:
     $insert_rate_user = sprintf("%.2f", $cache['num_inserts'] ? (($cache['num_inserts'])/$elapsed) : 0);
     $apcversion = phpversion('apcu');
     $phpversion = phpversion();
+    $cleanups = $cache['cleanups'] ?? '-';
+    $defragmentations = $cache['defragmentations'] ?? '-';
     $number_vars = $cache['num_entries'];
     $size_vars = bsize($cache['mem_size']);
     $num_hits_and_misses = $cache['num_hits'] + $cache['num_misses'];
@@ -804,6 +806,8 @@ EOB;
             <tr class=tr-0><td class=td-0>Hit Rate</td><td>$hit_rate_user cache requests/second</td></tr>
             <tr class=tr-1><td class=td-0>Miss Rate</td><td>$miss_rate_user cache requests/second</td></tr>
             <tr class=tr-0><td class=td-0>Insert Rate</td><td>$insert_rate_user cache requests/second</td></tr>
+            <tr class=tr-1><td class=td-0>Cache cleanup count</td><td>$cleanups</td></tr>
+            <tr class=tr-0><td class=td-0>Cache defragmentation count</td><td>$defragmentations</td></tr>
             <tr class=tr-1><td class=td-0>Cache full count</td><td>{$cache['expunges']}</td></tr>
         </tbody>
         </table>
@@ -961,7 +965,7 @@ EOB;
         '<option value=500',$MYREQUEST['COUNT']=='500'? ' selected':'','>Top 500</option>',
         '<option value=0  ',$MYREQUEST['COUNT']=='0'  ? ' selected':'','>All</option>',
         '</select>',
-    '&nbsp; Search: <input name=SEARCH value="',$MYREQUEST['SEARCH'],'" type=text size=25/>',
+    '&nbsp; Search: <input name=SEARCH value="',isset($MYREQUEST['SEARCH']) ? htmlspecialchars($MYREQUEST['SEARCH']) : '','" type=text size=25/>',
         '&nbsp;<input type=submit value="GO!">',
         '</form></div>';
 
@@ -1054,7 +1058,10 @@ EOB;
                     echo '<td class="td-last center">', date(DATE_FORMAT,$entry['deletion_time']), '</td>';
                 } else if ($MYREQUEST['OB'] == OB_USER_CACHE) {
                     echo '<td class="td-last center">';
-                    echo '[<a href="', $MY_SELF, '&OB=', $MYREQUEST['OB'], '&DU=', urlencode($entry[$fieldkey]), '">Delete Now</a>]';
+                    echo '[<a href="', $MY_SELF, '&OB=', $MYREQUEST['OB'],
+                        '&DU=', urlencode($entry[$fieldkey]),
+                        isset($MYREQUEST['SEARCH']) ? '&SEARCH=' . htmlspecialchars(urlencode($MYREQUEST['SEARCH'])) : '',
+                        '">Delete Now</a>]';
                     echo '</td>';
                 } else {
                     echo '<td class="td-last center"> &nbsp; </td>';

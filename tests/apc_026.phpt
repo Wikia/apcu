@@ -1,60 +1,21 @@
 --TEST--
-apcu_inc/dec() should not inc/dec soft expired entries based on global TTL setting
---SKIPIF--
-<?php
-require_once(__DIR__ . '/skipif.inc');
-if (!function_exists('apcu_inc_request_time')) die('skip APC debug build required');
-?>
+Huge allocations which don't fit into shm shouldn't cause cache wipes
 --INI--
 apc.enabled=1
 apc.enable_cli=1
-apc.use_request_time=1
-apc.ttl=2
+apc.shm_size=1M
 --FILE--
 <?php
 
-/* Keys chosen to collide */
-apcu_store("EzEz", 0);
-apcu_store("EzFY", 0, 100);
-apcu_store("FYEz", "xxx");
+// create a small entry which should survive
+apcu_store("test_1", 123, 1);
 
-echo "T+0:\n";
-apcu_store("FYEz", "xxx");
-var_dump(apcu_inc("EzEz"));
-var_dump(apcu_fetch("EzEz"));
-var_dump(apcu_dec("EzFY"));
-var_dump(apcu_fetch("EzFY"));
+// try to store an entry which is larger than the shm size (this should fail)
+var_dump(apcu_store("large_entry", str_repeat('x', 1024 * 1024), 1));
 
-echo "T+1:\n";
-apcu_inc_request_time(1);
-apcu_store("FYEz", "xxx");
-var_dump(apcu_inc("EzEz"));
-var_dump(apcu_fetch("EzEz"));
-var_dump(apcu_dec("EzFY"));
-var_dump(apcu_fetch("EzFY"));
-
-echo "T+4:\n";
-apcu_inc_request_time(3);
-apcu_store("FYEz", "xxx");
-var_dump(apcu_inc("EzEz"));
-var_dump(apcu_fetch("EzEz"));
-var_dump(apcu_dec("EzFY"));
-var_dump(apcu_fetch("EzFY"));
-
+// fetch the entry and check if it's still there
+var_dump(apcu_fetch("test_1") === 123);
 ?>
 --EXPECT--
-T+0:
-int(1)
-int(1)
-int(-1)
-int(-1)
-T+1:
-int(2)
-int(2)
-int(-2)
-int(-2)
-T+4:
-int(1)
-int(1)
-int(-1)
-int(-1)
+bool(false)
+bool(true)

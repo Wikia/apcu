@@ -1,89 +1,86 @@
-PHP_ARG_ENABLE(apcu, whether to enable APCu support,
-[  --enable-apcu           Enable APCu support])
+PHP_ARG_ENABLE([apcu],
+  [whether to enable APCu support],
+  [AS_HELP_STRING([--enable-apcu],
+    [Enable APCu support])])
 
-AC_MSG_CHECKING(if APCu should be allowed to use rwlocks)
-AC_ARG_ENABLE(apcu-rwlocks,
-[  --disable-apcu-rwlocks  Disable rwlocks in APCu],
-[
-  PHP_APCU_RWLOCKS=$enableval
-  AC_MSG_RESULT($enableval)
-],
-[
-  PHP_APCU_RWLOCKS=yes
-  AC_MSG_RESULT(yes)
-])
+PHP_ARG_ENABLE([apcu-rwlocks],
+  [if APCu should be allowed to use rwlocks],
+  [AS_HELP_STRING([--disable-apcu-rwlocks],
+    [Disable rwlocks in APCu])],
+  [yes],
+  [no])
 
-AC_MSG_CHECKING(if APCu should be built in debug mode)
-AC_ARG_ENABLE(apcu-debug,
-[  --enable-apcu-debug     Enable APCu debugging],
-[
-  PHP_APCU_DEBUG=$enableval
-],
-[
-  PHP_APCU_DEBUG=no
-])
-AC_MSG_RESULT($PHP_APCU_DEBUG)
+PHP_ARG_ENABLE([apcu-debug],
+  [if APCu should be built in debug mode],
+  [AS_HELP_STRING([--enable-apcu-debug],
+    [Enable APCu debugging])],
+  [no],
+  [no])
 
-AC_MSG_CHECKING(if APCu should clear on SIGUSR1)
-AC_ARG_ENABLE(apcu-clear-signal,
-[  --enable-apcu-clear-signal  Enable SIGUSR1 clearing handler],
-[
-  AC_DEFINE(APC_CLEAR_SIGNAL, 1, [ ])
-  AC_MSG_RESULT(yes)
-],
-[
-  AC_MSG_RESULT(no)
-])
+PHP_ARG_ENABLE([apcu-clear-signal],
+  [if APCu should clear on SIGUSR1],
+  [AS_HELP_STRING([--enable-apcu-clear-signal],
+    [Enable SIGUSR1 clearing handler])],
+  [no],
+  [no])
 
-PHP_APCU_MMAP=yes
-AC_MSG_CHECKING([if APCu will use mmap (or shm)])
-AC_ARG_ENABLE(apcu-mmap,
-[  --disable-apcu-mmap     Disable mmap, falls back on shm],
-[
-  if test "x$enableval" = "xno"; then
-    PHP_APCU_MMAP=no
-  else
-    PHP_APCU_MMAP=yes
-  fi
-])
-AC_MSG_RESULT($PHP_APCU_MMAP)
+PHP_ARG_ENABLE([apcu-mmap],
+  [if APCu should use mmap instead of shm],
+  [AS_HELP_STRING([--disable-apcu-mmap],
+    [Disable mmap, falls back on shm])],
+  [yes],
+  [no])
 
-PHP_APCU_SPINLOCK=no
-AC_MSG_CHECKING(if APCu should utilize spinlocks before flocks)
-AC_ARG_ENABLE(apcu-spinlocks,
-[  --enable-apcu-spinlocks        Use spinlocks before flocks],
-[ if test "x$enableval" = "xno"; then
-    PHP_APCU_SPINLOCK=no
-  else
-    PHP_APCU_SPINLOCK=yes
-  fi
-])
-AC_MSG_RESULT($PHP_APCU_SPINLOCK)
+PHP_ARG_ENABLE([apcu-spinlocks],
+  [if APCu should utilize spinlocks before flocks],
+  [AS_HELP_STRING([--enable-apcu-spinlocks],
+    [Use spinlocks before flocks])],
+  [no],
+  [no])
 
-if test "$PHP_APCU_RWLOCKS" != "no"; then
-  AC_CACHE_CHECK([whether the target compiler supports builtin atomics], PHP_cv_APCU_GCC_ATOMICS, [
+PHP_ARG_ENABLE([valgrind-checks],
+  [whether to enable Valgrind-based memory checks],
+  [AS_HELP_STRING([--disable-valgrind-checks],
+    [Disable Valgrind-based memory checks])],
+  [yes],
+  [no])
 
-    AC_LINK_IFELSE([AC_LANG_PROGRAM([[]], [[
+PHP_ARG_ENABLE([coverage],
+  [whether to include code coverage symbols],
+  [AS_HELP_STRING([--enable-coverage],
+    [Include code coverage symbols (DEVELOPERS ONLY!!)])],
+  [no],
+  [no])
+
+if test "$PHP_APCU" != "no"; then
+  AS_VAR_IF([PHP_APCU_DEBUG], [no], [],
+    [AC_DEFINE([APC_DEBUG], [1],
+      [Define to 1 if APCu debugging mode is enabled.])])
+
+  AS_VAR_IF([PHP_APCU_CLEAR_SIGNAL], [no], [],
+    [AC_DEFINE([APC_CLEAR_SIGNAL], [1],
+      [Define to 1 if SIGUSR1 clearing handler is enabled.])])
+
+  AS_VAR_IF([PHP_APCU_MMAP], [no], [],
+    [AC_DEFINE([APC_MMAP], [1],
+      [Define to 1 if APCu uses mmap instead of shm.])])
+
+  AS_VAR_IF([PHP_VALGRIND_CHECKS], [no], [],
+    [AC_CHECK_HEADERS([valgrind/memcheck.h], [],
+      [AC_MSG_NOTICE([Valgrind-based memory checks are disabled.])])])
+
+  AS_VAR_IF([PHP_APCU_RWLOCKS], [no], [], [
+    AC_CACHE_CHECK([whether the target compiler supports builtin atomics],
+      [PHP_cv_APCU_GCC_ATOMICS],
+      [AC_LINK_IFELSE([AC_LANG_PROGRAM([], [
         int foo = 0;
         __sync_add_and_fetch(&foo, 1);
         __sync_sub_and_fetch(&foo, 1);
         return 0;
-      ]])],[PHP_cv_APCU_GCC_ATOMICS=yes],[PHP_cv_APCU_GCC_ATOMICS=no])
+      ])], [PHP_cv_APCU_GCC_ATOMICS=yes], [PHP_cv_APCU_GCC_ATOMICS=no])])
+    AS_VAR_IF([PHP_cv_APCU_GCC_ATOMICS], [no],
+      [AC_MSG_FAILURE([Compiler does not support atomics])])
   ])
-
-  if test "x${PHP_cv_APCU_GCC_ATOMICS}" != "xyes"; then
-    AC_MSG_ERROR([Compiler does not support atomics])
-  fi
-fi
-
-if test "$PHP_APCU" != "no"; then
-  if test "$PHP_APCU_DEBUG" != "no"; then
-    AC_DEFINE(APC_DEBUG, 1, [ ])
-  fi
-
-  if test "$PHP_APCU_MMAP" != "no"; then
-    AC_DEFINE(APC_MMAP, 1, [ ])
-  fi
 
   if test "$PHP_APCU_RWLOCKS" != "no"; then
       orig_LIBS="$LIBS"
@@ -190,47 +187,21 @@ if test "$PHP_APCU" != "no"; then
 
   if test "$PHP_APCU_RWLOCKS" = "no"; then
    if test "$PHP_APCU_MUTEX" = "no"; then
-    if test "$PHP_APCU_SPINLOCK" != "no"; then
-      AC_DEFINE(APC_SPIN_LOCK, 1, [ ])
-      AC_MSG_WARN([APCu spin locking enabled])
-    else
-      AC_DEFINE(APC_FCNTL_LOCK, 1, [ ])
-      AC_MSG_WARN([APCu file locking enabled])
-    fi
+      AS_VAR_IF([PHP_APCU_SPINLOCKS], [no], [
+        AC_DEFINE([APC_FCNTL_LOCK], [1],
+          [Define to 1 if APCu file locking is enabled.])
+        AC_MSG_WARN([APCu file locking enabled])
+      ], [
+        AC_DEFINE([APC_SPIN_LOCK], [1],
+          [Define to 1 if APCu spin locking is enabled.])
+        AC_MSG_WARN([APCu spin locking enabled])
+      ])
    fi
   fi
 
   AC_CHECK_FUNCS(sigaction)
-  AC_CACHE_CHECK(for union semun, php_cv_semun,
-  [
-    AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
-#include <sys/types.h>
-#include <sys/ipc.h>
-#include <sys/sem.h>
-    ]], [[union semun x; x.val=1]])],[
-      php_cv_semun=yes
-    ],[
-      php_cv_semun=no
-    ])
-  ])
-  if test "$php_cv_semun" = "yes"; then
-    AC_DEFINE(HAVE_SEMUN, 1, [ ])
-  else
-    AC_DEFINE(HAVE_SEMUN, 0, [ ])
-  fi
 
-  AC_ARG_ENABLE(valgrind-checks,
-  [  --disable-valgrind-checks
-                          Disable valgrind based memory checks],
-  [
-    PHP_APCU_VALGRIND=no
-  ], [
-    PHP_APCU_VALGRIND=yes
-    AC_CHECK_HEADER(valgrind/memcheck.h,
-      [AC_DEFINE([HAVE_VALGRIND_MEMCHECK_H],1, [enable valgrind memchecks])])
-  ])
-
-  for i in -Wall -Wextra -Wno-unused-parameter; do
+  for i in -Wall -Wextra -Wno-clobbered -Wno-unused-parameter; do
     AX_CHECK_COMPILE_FLAG([$i], [APCU_CFLAGS="$APCU_CFLAGS $i"])
   done
 
@@ -245,17 +216,18 @@ if test "$PHP_APCU" != "no"; then
                  apc_iterator.c \
                  apc_persist.c"
 
-  PHP_CHECK_LIBRARY(rt, shm_open, [PHP_ADD_LIBRARY(rt,,APCU_SHARED_LIBADD)])
-  PHP_NEW_EXTENSION(apcu, $apc_sources, $ext_shared,, \\$(APCU_CFLAGS))
+  LIBS_SAVED=$LIBS; LIBS=
+  AC_SEARCH_LIBS([shm_open], [rt])
+  LIBS=$LIBS_SAVED
+  AS_CASE([$ac_cv_search_shm_open], ["none required"|no], [],
+    [PHP_EVAL_LIBLINE([$ac_cv_search_shm_open], [APCU_SHARED_LIBADD])])
+
+  PHP_NEW_EXTENSION([apcu], [$apc_sources], [$ext_shared],, [$APCU_CFLAGS])
   PHP_SUBST(APCU_SHARED_LIBADD)
-  PHP_SUBST(APCU_CFLAGS)
   PHP_SUBST(PHP_LDFLAGS)
   PHP_INSTALL_HEADERS(ext/apcu, [php_apc.h apc.h apc_api.h apc_cache.h apc_globals.h apc_iterator.h apc_lock.h apc_mutex.h apc_sma.h apc_serializer.h apc_stack.h apc_arginfo.h php_apc_legacy_arginfo.h])
   AC_DEFINE(HAVE_APCU, 1, [ ])
 fi
-
-PHP_ARG_ENABLE(coverage,  whether to include code coverage symbols,
-[  --enable-coverage           DEVELOPERS ONLY!!], no, no)
 
 if test "$PHP_COVERAGE" = "yes"; then
 
